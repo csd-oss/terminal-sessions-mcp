@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Web GUI: phone support** 📱 - On narrow or short viewports (phones in
+  portrait and landscape) the session list collapses into a drawer behind a
+  ☰ button, so the terminal gets the full width instead of a ~6-column strip.
+  Toolbar buttons wrap and are touch-sized, xterm.js refits on rotation,
+  resize and when the on-screen keyboard opens (visual viewport tracking),
+  safe-area insets are respected and the page no longer scrolls sideways.
+  A small extra-keys row (Esc / Tab / sticky Ctrl / arrows) sits above the
+  keyboard. Desktop layout is unchanged.
+- **Web GUI: installable (PWA)** - Web app manifest, icons and the
+  `apple-mobile-web-app-*` meta tags, so *Add to Home Screen* gives a
+  standalone app on iOS and Android. The `?token=` from the URL is remembered
+  in `localStorage` so the installed app (which opens without the query) can
+  still authenticate; it is dropped again on a 401. A small app-shell service
+  worker registers only in a secure context (https / localhost); plain http on
+  a VPN address works without it.
+- **Web GUI: desktop sidebar collapse and extra-keys toggle** - The ☰ button
+  now also appears on desktop and collapses/expands the session sidebar
+  (remembered per browser). A "⌨️ Keys" button in the terminal header toggles the
+  Esc/Tab/Ctrl/arrows row (on by default on touch devices, off on desktop,
+  remembered). The terminal refits through a `ResizeObserver` on every layout
+  and the PTY is only resized when the column/row grid actually changes.
+  Installing as an app also works in desktop Chrome/Edge over https/localhost.
+
 ## v1.6.0 - 2026-07-11
 
 ### Added
