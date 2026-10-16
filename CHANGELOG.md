@@ -37,6 +37,15 @@
   `enterDelayMs` in the `session.input` response and the clients raise an
   error when a (not yet restarted) older server ignores it instead of
   silently sending text and Enter together. Default behaviour is unchanged.
+- **Web GUI: Redraw** ⟳ - TUIs such as Claude Code draw by diff and skip cells
+  they believe are already on screen, so a viewer whose terminal state has
+  diverged (attached mid-stream, history replayed at another width, dropped
+  frames) shows holes in the picture. A ⟳ button in the terminal header asks
+  the program to repaint: the new `session.redraw` API nudges the PTY by one
+  row and restores it (the program gets SIGWINCH), serialized with real
+  resizes so the PTY never stays at the wrong size. The GUI also redraws
+  automatically after attaching to a session and when the tab becomes
+  visible again.
 
 ## v1.6.0 - 2026-07-11
 
