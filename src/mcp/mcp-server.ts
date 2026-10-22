@@ -33,6 +33,18 @@ interface LogMatch {
   context: string[];
 }
 
+/**
+ * What sendInput's and sendSignal's results say when the session server
+ * followed their Ctrl+C with Ctrl+U and Enter (see CLEAR_HELD_LINE in the
+ * session server). The result says it, not the tools' descriptions, since it
+ * matters only once it has happened: a caller sending a Ctrl+C has nothing to
+ * choose differently. A call withConnectionRetry sends again after a lost
+ * connection reports the second attempt's answer alone, so a Ctrl+U and Enter
+ * the first attempt wrote go unreported.
+ */
+const CLEARED_HELD_LINE_NOTE =
+  'Ctrl+U and Enter followed the Ctrl+C, to clear what the shell had read of the command it gave up.';
+
 export class ConnectomeTestingMCP {
   private client: RobustSessionClient | null = null;
   private apiUrl: string;
@@ -58,20 +70,23 @@ export class ConnectomeTestingMCP {
     }
   }
   
-  // Note: withConnectionRetry is now less critical since RobustSessionClient
-  // handles reconnection automatically, but we keep it for extra safety
+  // A request whose connection is lost while it's in flight is tried once more
+  // on a fresh client. runCommand's first listing relies on it to get through
+  // a session server's restart.
   private async withConnectionRetry<T>(operation: () => Promise<T>): Promise<T> {
+    const client = this.getClient();
     try {
       return await operation();
     } catch (error: any) {
-      // The RobustSessionClient should handle most reconnection scenarios,
-      // but this provides an extra layer of safety for edge cases
       if (error.message?.includes('ECONNREFUSED') || 
           error.message?.includes('WebSocket') ||
           error.message?.includes('EPIPE') ||
           error.message?.includes('socket hang up') ||
           error.message?.includes('Connection lost')) {
-        this.resetClient();
+        // Calls that lost one connection together each come here. Only the
+        // first replaces the client: closing the one another call has just
+        // made would fail that call's request.
+        if (this.client === client) this.resetClient();
         // Try once more with a fresh connection
         return await operation();
       }
@@ -128,19 +143,23 @@ export class ConnectomeTestingMCP {
   }): Promise<CommandResult> {
     const sessionId = this.serviceMap.get(params.session) || params.session;
 
-    // Auto-create session if it doesn't exist
-    try {
-      const sessions = await this.getClient().listSessions();
-      const exists = sessions.some((s: any) => s.id === sessionId);
-      if (!exists) {
-        await this.createSession({ id: sessionId, cwd: params.cwd });
-      }
-    } catch {
-      // If listing fails, try to create anyway — exec will give the real error
+    // Create the session if it's missing, and keep the creation's own error,
+    // such as a shared server's session limit: going on to exec would hide it
+    // behind "Session ... not found". A listing whose connection is lost
+    // while it's in flight is tried once more on a fresh one, as listSessions
+    // is, and a listing that still fails fails the call with its error.
+    const sessions = await this.withConnectionRetry(() => this.getClient().listSessions());
+    const exists = sessions.some((s: any) => s.id === sessionId);
+    if (!exists) {
       try {
         await this.createSession({ id: sessionId, cwd: params.cwd });
-      } catch {
-        // Session might already exist, continue to exec
+      } catch (creationError) {
+        // The session may exist after all, made by another call after our
+        // listing, or by this call's own create whose answer was lost. The
+        // command then runs in it. A second listing decides that, not the
+        // error's wording.
+        const current = await this.getClient().listSessions().catch(() => []);
+        if (!current.some((s: any) => s.id === sessionId)) throw creationError;
       }
     }
 
@@ -205,25 +224,29 @@ export class ConnectomeTestingMCP {
   async listSessions(): Promise<Array<{
     id: string;
     name?: string;
-    pid: number;
-    startTime: Date;
     isAlive: boolean;
+    createdAt: Date;
+    lastActivity: Date;
+    logSize: number;
   }>> {
     const sessions = await this.withConnectionRetry(() =>
       this.getClient().listSessions()
     );
-    
-    // Enhance with service names
+
+    // Enhance with service names. (Map the fields the server actually
+    // returns — the old pid/startTime fields never existed server-side and
+    // always came back undefined.)
     return sessions.map((session: any) => {
       const name = Array.from(this.serviceMap.entries())
         .find(([_, id]) => id === session.id)?.[0];
-      
+
       return {
         id: session.id,
         name,
-        pid: session.pid,
-        startTime: session.startTime,
-        isAlive: session.isAlive
+        isAlive: session.isAlive,
+        createdAt: session.createdAt,
+        lastActivity: session.lastActivity,
+        logSize: session.logSize
       };
     });
   }
@@ -285,13 +308,13 @@ export class ConnectomeTestingMCP {
     appendNewline?: boolean;
     keys?: string[];
     enterDelayMs?: number;
-  }): Promise<{ success: boolean; error?: string }> {
+  }): Promise<{ success: boolean; error?: string; note?: string }> {
     try {
       const sessionId = this.serviceMap.get(params.session) || params.session;
-      await this.withConnectionRetry(() =>
+      const sent = await this.withConnectionRetry(() =>
         this.getClient().sendInput(sessionId, params.input, params.appendNewline, params.keys, params.enterDelayMs)
       );
-      return { success: true };
+      return sent?.clearedHeldLine === true ? { success: true, note: CLEARED_HELD_LINE_NOTE } : { success: true };
     } catch (error: any) {
       return { success: false, error: error?.message || String(error) };
     }
@@ -304,13 +327,13 @@ export class ConnectomeTestingMCP {
   async sendSignal(params: {
     session: string;
     signal?: string;
-  }): Promise<{ success: boolean }> {
+  }): Promise<{ success: boolean; note?: string }> {
     try {
       const sessionId = this.serviceMap.get(params.session) || params.session;
-      await this.withConnectionRetry(() =>
+      const sent = await this.withConnectionRetry(() =>
         this.getClient().sendSignal(sessionId, params.signal || 'SIGINT')
       );
-      return { success: true };
+      return sent?.clearedHeldLine === true ? { success: true, note: CLEARED_HELD_LINE_NOTE } : { success: true };
     } catch (error) {
       return { success: false };
     }

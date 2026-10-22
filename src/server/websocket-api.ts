@@ -9,6 +9,7 @@ import { createServer } from 'http';
 import { EventEmitter } from 'events';
 import { PersistentSessionServer } from './session-server-v3';
 import { assertEnterDelayHonoured } from './keys';
+import { AccessOptions, RequestGuard, accessFromEnv, requestUrl, tokenMatches } from './request-guard';
 
 interface APIMessage {
   id: string;
@@ -42,9 +43,12 @@ export class SessionAPI {
   private subscriptions = new Map<WebSocket, SubscriptionState>();
   private serverListeners: Array<{ event: string; handler: (payload: any) => void }> = [];
   private authToken?: string;
-  
-  constructor(port: number = 3100, host: string = 'localhost', authToken?: string) {
+  private guard: RequestGuard;
+
+  constructor(port: number = 3100, host: string = 'localhost', authToken?: string, access: AccessOptions = accessFromEnv()) {
     this.authToken = authToken;
+    // Host/Origin check at every request and upgrade (see request-guard.ts)
+    this.guard = new RequestGuard(host, () => this.httpServer?.address()?.port ?? port, !!authToken, access, 'SessionAPI');
     this.server = new PersistentSessionServer();
     // Let takeScreenshot authenticate against the (token-protected) web GUI
     this.server.guiAuthToken = authToken;
@@ -72,6 +76,12 @@ export class SessionAPI {
     
     // Create HTTP server
     this.httpServer = createServer((req, res) => {
+      const verdict = this.guard.check(req);
+      if (!verdict.ok) {
+        res.writeHead(verdict.status, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end(verdict.message);
+        return;
+      }
       // Simple health check
       if (req.url === '/health') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -86,15 +96,23 @@ export class SessionAPI {
     });
     
     // Create WebSocket server
-    this.wss = new WebSocketServer({ server: this.httpServer });
-    
+    // Refuse cross-origin pages and unserved Hosts at the upgrade, before any session work.
+    this.wss = new WebSocketServer({
+      server: this.httpServer,
+      verifyClient: (info, done) => {
+        const verdict = this.guard.check(info.req);
+        if (verdict.ok) done(true);
+        else done(false, verdict.status, verdict.message);
+      },
+    });
+
     this.wss.on('connection', (ws, req) => {
       // Validate auth token if configured
       if (this.authToken) {
-        const url = new URL(req.url || '', `http://${req.headers.host}`);
-        const providedToken = url.searchParams.get('token');
-        
-        if (providedToken !== this.authToken) {
+        // Parse against a fixed base: the Host header is client-chosen.
+        const providedToken = requestUrl(req.url)?.searchParams.get('token');
+
+        if (!tokenMatches(providedToken, this.authToken)) {
           if (process.env.DEBUG_SESSION_API) {
             console.error('[SessionAPI] Rejected connection: invalid token');
           }
@@ -186,21 +204,24 @@ export class SessionAPI {
           result = await this.server.startService(params);
           break;
           
-        case 'session.input':
-          await this.server.sendInput(
+        case 'session.input': {
+          const { clearedHeldLine, written } = this.server.sendInput(
             params.sessionId, params.input, params.appendNewline, params.keys, params.enterDelayMs
           );
+          await written;
           // Echo enterDelayMs so clients can tell this server honoured it
-          // (older servers return a bare { success: true }).
+          // (older servers leave it out).
           result = params.enterDelayMs === undefined
-            ? { success: true }
-            : { success: true, enterDelayMs: params.enterDelayMs };
+            ? { success: true, clearedHeldLine }
+            : { success: true, clearedHeldLine, enterDelayMs: params.enterDelayMs };
           break;
+        }
           
-        case 'session.signal':
-          this.server.sendSignal(params.sessionId, params.signal);
-          result = { success: true };
+        case 'session.signal': {
+          const { clearedHeldLine } = this.server.sendSignal(params.sessionId, params.signal);
+          result = { success: true, clearedHeldLine };
           break;
+        }
           
         case 'session.env':
           result = await this.server.getEnvironment(params.sessionId);

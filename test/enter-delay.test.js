@@ -129,6 +129,10 @@ function fakeServer() {
   const server = new PersistentSessionServer();
   const writes = [];
   const session = {
+    // the state upstream's input path reads (as plumbing.test.js's bareSession)
+    issued: new Map(), issuedPaths: new Set(), pendingFiles: new Map(), unfinished: new Map(),
+    typedInline: new Set(), inlinePieces: new Map(), inlineQueue: [], typedCount: 0, lineSeq: new Map(),
+    scanCarry: '', awaitingMarkers: [], logs: [], interruptedProbes: new Set(), typingProgressAt: 0,
     id: 'fake',
     isAlive: true,
     lastActivity: new Date(),
@@ -142,9 +146,9 @@ function fakeServer() {
 test('server.sendInput: a plain call queues behind a pending delayed Enter', async () => {
   const { server, writes, cleanup } = fakeServer();
   try {
-    const first = server.sendInput('fake', 'first', undefined, undefined, 40);
+    const first = server.sendInput('fake', 'first', undefined, undefined, 40).written;
     assert.deepEqual(writes, ['first']); // text written synchronously
-    const second = server.sendInput('fake', 'second');
+    const second = server.sendInput('fake', 'second').written;
     assert.deepEqual(writes, ['first']); // second must wait for first's Enter
     await Promise.all([first, second]);
     assert.deepEqual(writes, ['first', '\r', 'second\r']);
@@ -156,7 +160,7 @@ test('server.sendInput: a plain call queues behind a pending delayed Enter', asy
 test('server.sendInput: without a delay the write is synchronous and nothing is left queued', async () => {
   const { server, writes, cleanup } = fakeServer();
   try {
-    const p = server.sendInput('fake', 'ls');
+    const p = server.sendInput('fake', 'ls').written;
     assert.deepEqual(writes, ['ls\r']);
     await p;
     assert.equal(server.inputChains.size, 0);
@@ -168,8 +172,8 @@ test('server.sendInput: without a delay the write is synchronous and nothing is 
 test('server.sendInput: a queued call fails if the session died meanwhile, later calls still run', async () => {
   const { server, session, writes, cleanup } = fakeServer();
   try {
-    const first = server.sendInput('fake', 'first', undefined, undefined, 20);
-    const second = server.sendInput('fake', 'second');
+    const first = server.sendInput('fake', 'first', undefined, undefined, 20).written;
+    const second = server.sendInput('fake', 'second').written;
     session.isAlive = false;
     await assert.rejects(first, /exited before the delayed Enter/);
     await assert.rejects(second, /not available/);
@@ -221,17 +225,20 @@ test('server.execCommand: a command issued during a pending delayed Enter is typ
   const { server, session, writes, cleanup } = fakeServer();
   Object.assign(session, { commandQueue: [], isProcessingCommand: false, logs: [], outputBuffer: '', tempFiles: [] });
   try {
-    const input = server.sendInput('fake', 'echo A', undefined, undefined, 60);
+    const input = server.sendInput('fake', 'echo A', undefined, undefined, 60).written;
     assert.deepEqual(writes, ['echo A']);
     const cmd = server.execCommand('fake', 'echo B', 150); // resolves via its own timeout (-1), fine for this test
     await new Promise(r => setTimeout(r, 10));
     assert.deepEqual(writes, ['echo A']); // not typed over the pending line
     await input;
     await new Promise(r => setTimeout(r, 5));
-    assert.deepEqual(writes.slice(0, 3), ['echo A', '\r', 'echo B\n']);
+    assert.deepEqual(writes.slice(0, 2), ['echo A', '\r']);
+    // then echo B's line (the temp-file probe since upstream 1.7)
+    assert.match(writes[2], /^if \[ -r '.*tsm-cmd-/);
     const result = await cmd;
     assert.equal(result.exitCode, -1);
   } finally {
+    for (const file of session.pendingFiles.values()) require('fs').rmSync(file, { force: true });
     cleanup();
   }
 });
@@ -239,7 +246,7 @@ test('server.execCommand: a command issued during a pending delayed Enter is typ
 test('server.sendSignal: Ctrl+C stays immediate during a pending Enter', async () => {
   const { server, writes, cleanup } = fakeServer();
   try {
-    const input = server.sendInput('fake', 'sleep 5', undefined, undefined, 40);
+    const input = server.sendInput('fake', 'sleep 5', undefined, undefined, 40).written;
     server.sendSignal('fake', 'SIGINT');
     assert.deepEqual(writes, ['sleep 5', '\x03']);
     await input;
