@@ -72,6 +72,18 @@ session-server --headless
 session-server --host 0.0.0.0 --token your-secret-token
 ```
 
+**Who may connect.** Both ports (the session API and the web GUI) refuse
+browser pages from other sites: a request that carries an `Origin` must come
+from the GUI's own page, or from an origin you list with `--allow-origin`.
+Without a token, they also serve only requests addressed to `localhost`,
+`127.0.0.1`, `[::1]` or the bind address; to reach a token-less server by any
+other name, list it with `--allow-host` (or, better, use `--token`):
+```bash
+session-server --allow-origin https://dashboard.example   # a page that drives the API from a browser
+session-server --host 0.0.0.0 --allow-host mybox.local    # token-less, LAN name (prefer --token)
+```
+Both flags take comma-separated values and may repeat.
+
 **Keep this server running** in the background - your AI assistant will connect to it.
 
 ### 3. Configure the MCP Bridge for Your AI
@@ -297,6 +309,35 @@ or `launch` issued while an Enter is pending waits for it. Default behaviour
 { "session": "claude", "input": "Summarise the failing tests", "enterDelayMs": 150 }
 ```
 
+While a command is on its way in, `sendInput` refuses input other than a lone
+`C-c` and sends nothing, since until the command has started, the shell in
+front could read the input instead. A command is on its way in from the moment
+its line is typed, or held behind a body still going in, until it starts, ends
+or is given up, and a body typed in for a shell that can't read the temp file
+is on its way in until it starts. A command waiting in the server's queue,
+behind one that hasn't ended or timed out, isn't on its way in yet, so input
+then goes to the running one. The refusal also ends after two seconds in which
+the server has typed no line and read no marker, as when a program rather than
+a shell took the command's line, or a busy shell hasn't read it yet; that
+doesn't mean the command has started. Send refused input again in a moment. To
+interrupt a command, use `sendSignal` with SIGINT, its default, or send the
+`C-c` key alone (empty text, `keys: ["C-c"]`); neither is refused. When either
+gives up a body that a shell which can't read the temp file is partway through
+reading, the server follows the Ctrl-C with Ctrl-U and Enter, which drop what
+the shell had read of the body's line. The server takes the shell to be reading
+while the latest marker it printed isn't a command's start marker and no other
+input has been sent since. A body whose lines are all typed may be running, and
+gets the Ctrl-C alone. So does a body partway typed in after a command's start
+marker, since that command reads the terminal and may have read the body's
+first line, and after other input sent with `sendInput`, which may have started
+a command, until a marker other than a start marker comes. This is the one case
+in which `sendInput` writes more than its `input`, `keys` and `appendNewline`
+ask for. When it happens, the call's result says so: the MCP tools' results
+carry a `note`, and the session server's answer `clearedHeldLine: true`. The MCP
+tools report the answer to their last attempt: if the connection is lost after
+a call went in, they send it again, and the result doesn't report a Ctrl-U and
+Enter that the first attempt wrote.
+
 ### Log Operations
 - **tailLogs** - Get recent logs from a session
 - **searchLogs** - Search logs with regex patterns and context
@@ -429,7 +470,9 @@ npx ts-node examples/service-management.ts
 **Server:**
 - `SESSION_SERVER_PORT` - WebSocket session server port (default: 3100)
 - `SESSION_SERVER_HOST` - Host to bind to (default: localhost)
-- `SESSION_SERVER_TOKEN` - Authentication token (optional, recommended for remote access)
+- `SESSION_SERVER_TOKEN` - Authentication token (optional, required for remote access by other names unless listed with `SESSION_SERVER_ALLOW_HOSTS`)
+- `SESSION_SERVER_ALLOW_HOSTS` - Comma-separated Host names (optionally `name:port`) a token-less server serves besides the loopback names (same as `--allow-host`)
+- `SESSION_SERVER_ALLOW_ORIGINS` - Comma-separated browser origins allowed besides the GUI's own page (same as `--allow-origin`)
 - `GUI_PORT` - Web GUI port (default: 3200)
 
 **MCP Client:**
